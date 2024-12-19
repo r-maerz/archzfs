@@ -62,5 +62,3 @@ package() {
     install -D -m644 contrib/bash_completion.d/zfs "\${pkgdir}"/usr/share/bash-completion/completions/zfs
 }
 EOF
-
-pkgbuild_cleanup "${zfs_utils_pkgbuild_path}/PKGBUILD"

@@ -33,8 +33,4 @@ package() {
     find . -name ".git*" -print0 | xargs -0 rm -fr --
     scripts/dkms.mkconf -v ${zfs_mod_ver} -f dkms.conf -n zfs
 }
-
-
 EOF
-
-pkgbuild_cleanup "${zfs_dkms_pkgbuild_path}/PKGBUILD"
