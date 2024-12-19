@@ -1,0 +1,95 @@
+name: BUILD AND RELEASE
+on: 
+  workflow_dispatch:
+    inputs:
+      openzfs_version:
+        description: 'Which ZFS version to build'
+        default: '2.2.7'
+        required: true
+      openzfs_rc_version:
+        description: 'Which ZFS RC version to build'
+        default: ''
+        required: false
+      openzfs_git_version:
+        description: 'Which ZFS GIT version to build'
+        default: ''
+        required: false
+      release:
+        description: 'Which pkgrel to build'
+        default: '1'
+        required: true
+      kernels:
+        description: 'Which kernels to build for'
+        default: 'all'
+        required: true
+      packages:
+        description: 'Which package derivatives to build'
+        default: 'std rc git'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build_and_release:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+      options: --privileged
+    steps:
+      - name: Checkout git repo
+        uses: actions/checkout@v4
+      - name: Update PKGBUILD files
+        shell: bash
+        run: |
+          ./update.sh --zfs-version "${OPENZFS_VERSION}" --zfs-rc-version "${OPENZFS_RC_VERSION}" --zfs-git-version "${OPENZFS_GIT_VERSION}" --release ${PKG_VERSION} --kernels "${KERNELS_TO_BUILD}"
+        env:
+          OPENZFS_VERSION: ${{ inputs.openzfs_version }}
+          OPENZFS_RC_VERSION: ${{ inputs.openzfs_rc_version }}
+          OPENZFS_GIT_VERSION: ${{ inputs.openzfs_git_version }}
+          PKG_VERSION: ${{ inputs.release }}
+          KERNELS_TO_BUILD: ${{ inputs.kernels }}
+      - name: Build packages
+        shell: bash
+        run: |
+          cp -f ./build-container/systemd-nspawn-wrapper /usr/local/bin/systemd-nspawn
+          ./build.sh --create-chroot --kernels "${KERNELS_TO_BUILD}" --packages "${PACKAGES_TO_BUILD}"
+        env:
+          KERNELS_TO_BUILD: ${{ inputs.kernels }}
+          PACKAGES_TO_BUILD: ${{ inputs.packages }}
+      - name: Release stable packages
+        uses: ncipollo/release-action@v1.14.0
+        with:
+          name: stable
+          tag: stable
+          commit: ${{ github.sha }}
+          artifacts: ./repo/std/*
+          allowUpdates: true
+          artifactErrorsFailBuild: true
+          omitBody: true
+          omitBodyDuringUpdate: true
+          removeArtifacts: true
+      - name: Release experimental packages
+        uses: ncipollo/release-action@v1.14.0
+        with:
+          name: experimental
+          tag: experimental
+          commit: ${{ github.sha }}
+          artifacts: ./repo/rc/*
+          allowUpdates: true
+          artifactErrorsFailBuild: true
+          omitBody: true
+          omitBodyDuringUpdate: true
+          removeArtifacts: true
+      - name: Release git packages
+        uses: ncipollo/release-action@v1.14.0
+        with:
+          name: git
+          tag: git
+          commit: ${{ github.sha }}
+          artifacts: ./repo/git/*
+          allowUpdates: true
+          artifactErrorsFailBuild: true
+          omitBody: true
+          omitBodyDuringUpdate: true
+          removeArtifacts: true

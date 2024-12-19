@@ -59,7 +59,4 @@ package_${zfs_pkgname}-headers() {
     # Remove reference to \${srcdir}
     sed -i "s+\${srcdir}++" \${pkgdir}/usr/src/zfs-*/\${_extramodules}/Module.symvers
 }
-
 EOF
-
-pkgbuild_cleanup "${zfs_pkgbuild_path}/PKGBUILD"

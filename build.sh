@@ -1,339 +1,279 @@
 #!/bin/bash
-
-
 #
-# This script builds the archzfs packages in a clean clean chroot environment.
+# This script builds the archzfs packages in a clean chroot environment.
 #
-# clean-chroot-manager (https://github.com/graysky2/clean-chroot-manager) is required!
-#
+set -e
 
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+WHITE='\033[1;37m'
+NOCOLOR='\033[0m'
 
-args=("$@")
-script_name=$(basename $0)
-script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+main() {
+  unset KERNELS
+  unset PACKAGES
+  unset WORK_IN_DIR
+  unset BUILD_AS_USER
+  unset SETUP_CHROOT
 
+  args=$(getopt -a -o k:p:d:u:c --long kernels:,packages:,work-dir:,build-user:,create-chroot -- "$@")
+  if [[ $? -gt 0 ]]; then
+    usage
+  fi
 
-if ! source ${script_dir}/lib.sh; then
-    echo "!! ERROR !! -- Could not load lib.sh!"
-    exit 155
-fi
-source_safe "${script_dir}/conf.sh"
+  eval set -- ${args}
+  while :
+  do
+    case $1 in
+      -k | --kernels)   KERNELS=$2   ; shift 2 ;;
+      -p | --packages)   PACKAGES=$2   ; shift 2 ;;
+      -d | --work-dir)   WORK_IN_DIR=$2   ; shift 2 ;;
+      -u | --build-user) BUILD_AS_USER=$2   ; shift 2 ;;
+      -c | --create-chroot)    SETUP_CHROOT=1   ; shift 1 ;;
+      # -- means the end of the arguments; drop this, and break out of the while loop
+      --) shift; break ;;
+      *) >&2 echo Unsupported option: $1
+         usage ;;
+    esac
+  done
 
-# save conf variables
-zfs_src_hash_conf=${zfs_src_hash}
+  RANDINT=${RANDOM:0:4}
+  SCRIPTDIR="$(pwd)"
+  source "${SCRIPTDIR}/conf.sh"
 
-usage() {
-    echo "${script_name} - A build script for archzfs"
-    echo
-    echo "Usage: ${script_name} [options] mode command [command ...]"
-    echo
-    echo "Options:"
-    echo
-    echo "    -h:    Show help information."
-    echo "    -n:    Dryrun; Output commands, but don't do anything."
-    echo "    -d:    Show debug info."
-    echo "    -s:    Skip git packages and only build stable packages"
-    echo "    -R:    Perform git reset in packages directory for Mode."
-    echo "    -u:    Perform an update in the clean chroot."
-    echo "    -U:    Update the file sums in conf.sh."
-    echo "    -C:    Remove all files that are not package sources."
-    echo
-    echo "Modes:"
-    echo
-    for ml in "${mode_list[@]}"; do
-        mn=$(echo ${ml} | cut -f2 -d:)
-        md=$(echo ${ml} | cut -f3 -d:)
-        if [[ ${#mn} -gt 3 ]]; then
-            echo -e "    ${mn}\t  ${md}"
-        else
-            echo -e "    ${mn}\t\t  ${md}"
-        fi
-    done
-    echo "    all           Select and use all available packages"
-    echo
-    echo "Commands:"
-    echo
-    echo "    make          Build all packages."
-    echo "    test          Build test packages."
-    echo "    update        Update all git PKGBUILDs using conf.sh variables."
-    echo "    update-test   Update all git PKGBUILDs using the testing conf.sh variables."
-    echo "    sources       Build the package sources. This is done by default when using the make command."
-    echo
-    echo "Examples:"
-    echo
-    echo "    ${script_name} std -C                   :: Remove all compiled packages for the standard kernels"
-    echo "    ${script_name} std make -u              :: Update the chroot and build all of the packages"
-    echo "    ${script_name} lts update               :: Update PKGBUILDS only"
-    echo "    ${script_name} std update make -u       :: Update PKGBUILDs, update the chroot, and make all of the packages"
-    echo "    ${script_name} lts update-test test -u  :: Update PKGBUILDs (use testing versions), update the chroot, and make all of the packages"
-    exit 155
+  if ! [ -z ${KERNELS+x} ]; then KERNEL_LIST=($KERNELS); else KERNEL_LIST=("${kernel_list[@]}"); fi
+  if [[ " ${KERNEL_LIST[*]} " =~ "all" ]] then KERNEL_LIST=("_utils" "dkms" "linux" "linux-lts" "linux-hardened" "linux-zen"); fi
+  if ! [ -z ${PACKAGES+x} ]; then PKG_LIST=($PACKAGES); else PKG_LIST=("${pkg_list[@]}"); fi
+  if [[ " ${PKG_LIST[*]} " =~ "all" ]] then PKG_LIST=("std" "git" "rc"); fi
+  if ! [ -z ${WORK_IN_DIR+x} ]; then WORKDIR=$WORK_IN_DIR; else WORKDIR="/archzfs_${RANDINT}"; fi
+  if ! [ -z ${BUILD_AS_USER+x} ]; then BUILD_USER=$BUILD_AS_USER; else BUILD_USER="buildbot_${RANDINT}"; fi
+  if ! [ -z ${SETUP_CHROOT+x} ]; then CHROOT_SETUP=1; fi
+  echo -e "\n${BLUE}==>${WHITE} Working with \n{\n  kernels: $(echo ${KERNEL_LIST[@]} | tr ' ' ',')\n  packages: $(echo ${PKG_LIST[@]} | tr ' ' ',')\n  build_user: ${BUILD_USER}\n  work_dir: ${WORKDIR}\n  create_chroot: $([[ $CHROOT_SETUP -eq 1 ]] && echo 'true' || echo 'false')\n}${NOCOLOR}\n"
+
+  if [[ $(readlink -f "${WORKDIR}") == *"${SCRIPTDIR}"* ]]; then
+    echo -e "${RED}==> ERROR:${WHITE} ${WORKDIR} (WORKDIR) is a subdirectory of ${SCRIPTDIR} (SCRIPTDIR).\nREFUSING.${NOCOLOR}"
+    exit 155;
+  fi
+
+  BINDDIR="${WORKDIR}/source"
+  CHROOTDIR="${WORKDIR}/chroot"
+  REPODIR="${WORKDIR}/repo"
+  STARTTIMEINSEC=$(date +%s);
+
+  add_builduser
+
+  if [[ $CHROOT_SETUP -eq 1 ]]; then
+    create_chroot
+    create_repo
+  else
+    create_repo
+  fi
+
+  fix_permissions
+
+  for KERNEL_NAME in ${KERNEL_LIST[@]}; do
+    build_packages
+    build_sources
+  done
+
+  remove_builduser
+  ENDTIMEINSEC=$(date +%s);
+  echo -e "${GREEN}==>${WHITE} Done! Script took $(date -u -d "0 $ENDTIMEINSEC sec - $STARTTIMEINSEC sec" +"%H:%M:%S") to finish.${NOCOLOR}"
+
 }
 
+usage(){                                                                                                                                                                                                         >&2 cat << EOF
+Usage: $0
+   [ -k | --kernels <string> (space delimited) ]
+   [ -p | --packages <string> (space delimited) ]
+   [ -d | --work_dir <string> (absolute path) ]
+   [ -u | --build-user <string> (username) ]
+   [ -c | --create_chroot ]
+EOF
+exit 1
+}
+
+add_builduser(){
+  echo -e "${BLUE}==>${WHITE} Ensuring sudo is installed ...${NOCOLOR}\n"
+  pacman-key --init && pacman -Syy
+  if [[ ! $(pacman -Qi sudo | grep "Version") ]]; then pacman -S --noconfirm --needed sudo; fi
+      
+  echo -e "${BLUE}==>${WHITE} Creating build user ${BUILD_USER} ...${NOCOLOR}\n"
+  if [[ $(getent passwd ${BUILD_USER}) ]]; then
+    echo -e "${YELLOW}==> WARN:${WHITE} ${BUILD_USER} exists, skipping creation ...${NOCOLOR}\n"
+  else
+    useradd -r -s /sbin/false ${BUILD_USER}
+  fi
+
+  if [ ! -d "${WORKDIR}" ]; then mkdir -p "${WORKDIR}"; fi
+  WORKDIR=$(readlink -e ${WORKDIR})
+  OG_WORKDIR_USER="$(stat -c '%U' "${WORKDIR}")"
+  chown -R ${BUILD_USER}:${BUILD_USER} ${WORKDIR}
+
+  sudo -u ${BUILD_USER} test -w "${WORKDIR}" || { \
+    echo -e "${RED}==> ERROR:${WHITE} ${BUILD_USER} can not access '${WORKDIR}'.\n${NOCOLOR}Removing build user (if it is a buildbot) and aborting."; \
+    if [[ ${BUILD_USER} == *"buildbot"* ]]; then userdel ${BUILD_USER}; fi; \
+    chown -R ${OG_WORKDIR_USER}:${OG_WORKDIR_USER} $WORKDIR; \
+    exit 155; \
+  }
+
+  if [[ ! $(logname) == ${BUILD_USER} ]]; then
+    echo -e "${BLUE}==>${WHITE} Granting limited sudo rights to ${BUILD_USER} ...${NOCOLOR}\n"
+    echo -e "Defaults env_keep += \"BUILDTOOL BUILDTOOLVER\"\n${BUILD_USER} ALL=(ALL) NOPASSWD: /usr/bin/tee,/usr/bin/rm,/usr/bin/pacman,/usr/bin/mkarchroot,/usr/bin/makechrootpkg" | tee /etc/sudoers.d/zzz_${BUILD_USER} > /dev/null
+  fi
+}
+
+remove_builduser(){
+  echo -e "${BLUE}==>${WHITE} Moving repositories to SCRIPTDIR ...${NOCOLOR}\n"
+  mv ${REPODIR} ${SCRIPTDIR}/
+
+  echo -e "${BLUE}==>${WHITE} Fixing SCRIPTDIR ownership ...${NOCOLOR}\n"
+  cd ${SCRIPTDIR}
+
+  if [[ -f /.dockerenv ]]; then
+    echo -e "${YELLOW}==>WARN:${WHITE} Build ran inside Docker; setting owner of SCRIPTDIR to root ...${NOCOLOR}\n"
+    chown -R root:root "${SCRIPTDIR}"
+  else
+    chown -R ${OG_SCRIPTDIR_USER}:${OG_SCRIPTDIR_USER} "${SCRIPTDIR}"
+  fi
+
+  echo -e "${BLUE}==>${WHITE} Removing working directory, sudo config and build user (if it is a buildbot) ...${NOCOLOR}\n"
+  if [[ ${BUILD_USER} == *"buildbot"* ]]; then
+    userdel ${BUILD_USER}
+  fi
+  rm -f /etc/sudoers.d/zzz_${BUILD_USER}
+  sleep 5
+  umount -R ${BINDDIR}
+  sleep 2
+  if [[ ! $(findmnt -M ${BINDDIR}) ]]; then rm -rf ${WORKDIR}; fi
+}
+
+fix_permissions(){
+  if [ -d "${BINDDIR}" ]; then umount -R ${BINDDIR} ||: ; fi
+  echo -e "${BLUE}==>${WHITE} Creating bind mount and fixing permissions ...${NOCOLOR}\n"
+  mkdir -p "${BINDDIR}"
+  mount --bind ${SCRIPTDIR} ${BINDDIR}
+
+  OG_SCRIPTDIR_USER="$(stat -c '%U' "${SCRIPTDIR}")"
+  chown -R ${BUILD_USER}:${BUILD_USER} "${BINDDIR}"
+  chown -R ${BUILD_USER}:${BUILD_USER} "${REPODIR}"
+}
+
+create_chroot() {
+  echo -e "${BLUE}==>${WHITE} Check if Docker fixes are needed ...${NOCOLOR}\n"
+  
+  if [[ -f /.dockerenv ]]; then
+    sed -i 's/^NoExtract/#&/g' /etc/pacman.conf
+    systemd-machine-id-setup
+  fi
+  
+  if [ -d "${CHROOTDIR}" ]; then rm -Rf "${CHROOTDIR}"; fi
+  mkdir -p "${CHROOTDIR}"
+
+  echo -e "${BLUE}==>${WHITE} Ensuring devtools are installed ...${NOCOLOR}\n"
+  if [[ ! $(pacman -Qi devtools | grep "Version") ]]; then pacman -S --noconfirm --needed devtools; fi
+  echo -e "${BLUE}==>${WHITE} Creating minimal chroot environment ...${NOCOLOR}"
+  mkarchroot ${CHROOTDIR}/root base-devel
+}
+
+create_repo(){
+  echo -e "${BLUE}==>${WHITE} Removing previous versions of repositories ...${NOCOLOR}\n"
+  if [ -d "${REPODIR}" ]; then rm -Rf "${REPODIR}"; fi
+  if [ -d "${SCRIPTDIR}/repo" ]; then rm -Rf "${SCRIPTDIR}/repo"; fi
+  
+  echo -e "${BLUE}==>${WHITE} Updating pacman.conf and makepkg.conf inside chroot ...${NOCOLOR}\n"
+  for PKG in "${PKG_LIST[@]}"; do
+    mkdir -p "${REPODIR}/${PKG}"
+    echo -e "\n[archzfs_${PKG}]\nSigLevel = Optional TrustAll\nServer = file://${REPODIR}/${PKG}" | tee -a $CHROOTDIR/root/etc/pacman.conf > /dev/null
+    repo-add "${REPODIR}/${PKG}/archzfs_${PKG}.db.tar.zst"
+  done
+
+  echo -e "\nPACKAGER=\"ArchZFS Project <https://github.com/archzfs>\"" | tee -a $CHROOTDIR/root/etc/makepkg.conf > /dev/null
+}
 
 cleanup() {
-    # $1: the package name
-    msg "Cleaning up work files..."
-    fincs='-iname "*.log" -o -iname "*.pkg.tar.zst*" -o -iname "*.src.tar.gz"'
-    run_cmd "find ${script_dir}/packages/${kernel_name}/$1 \( ${fincs} \) -print -exec rm -rf {} \\;"
-    run_cmd "rm -rf  */src"
-    run_cmd "rm -rf */*.tar.gz"
+  # $1: the package name
+  echo -e "${BLUE}==>${WHITE} Cleaning up work files ...${NOCOLOR}\n"
+  find ${BINDDIR}/packages/${KERNEL_NAME}/$1 -iname "*.log" -o -iname "*.pkg.tar.zst*" -o -iname "*.src.tar.gz" | xargs rm -rf
+  rm -rf */src
+  rm -rf */*.tar.gz
+  ls -alh
 }
-
-
-build_sources() {
-    for pkg in "${pkg_list[@]}"; do
-
-        if check_skip_src $pkg; then
-            msg "skipping"
-            continue;
-        fi
-
-        msg "Building source for ${pkg}";
-        run_cmd "chown -R ${makepkg_nonpriv_user}: '${script_dir}/packages/${kernel_name}/${pkg}'"
-        run_cmd "su - ${makepkg_nonpriv_user} -s /bin/sh -c 'cd \"${script_dir}/packages/${kernel_name}/${pkg}\" && makepkg --printsrcinfo > .SRCINFO && makepkg --source'"
-    done
-}
-
-
-generate_package_files() {
-    debug "kernel_version_full: ${kernel_version_full}"
-    debug "kernel_mod_path: ${kernel_mod_path}"
-    debug "archzfs_package_group: ${archzfs_package_group}"
-    debug "header: ${header}"
-    debug "zfs_pkgver: ${zfs_pkgver}"
-    debug "zfs_pkgrel: ${zfs_pkgrel}"
-    debug "zfs_makedepends: ${zfs_makedepends}"
-    debug "openzfs_version: ${openzfs_version}"
-    debug "zfs_utils_pkgname: ${zfs_utils_pkgname}"
-    debug "zfs_pkgname: ${zfs_pkgname}"
-    debug "zfs_utils_pkgbuild_path: ${zfs_utils_pkgbuild_path}"
-    debug "zfs_pkgbuild_path: ${zfs_pkgbuild_path}"
-    debug "zfs_workdir: ${zfs_workdir}"
-    debug "zfs_src_target: ${zfs_src_target}"
-    debug "zfs_src_hash: ${zfs_src_hash}"
-    debug "zfs_initcpio_install_hash: ${zfs_initcpio_install_hash}"
-    debug "zfs_initcpio_hook_hash: ${zfs_initcpio_hook_hash}"
-
-    # Make sure our target directory exists
-    if [[ "${kernel_name}" == "_utils" ]]; then
-        run_cmd_no_output "[[ -d "${zfs_utils_pkgbuild_path}" ]] || mkdir -p ${zfs_utils_pkgbuild_path}"
-    elif [[ "${kernel_name}" == "dkms" ]]; then
-        run_cmd_no_output "[[ -d "${zfs_dkms_pkgbuild_path}" ]] || mkdir -p ${zfs_dkms_pkgbuild_path}"
-    else
-        run_cmd_no_output "[[ -d "${zfs_pkgbuild_path}" ]] || mkdir -p ${zfs_pkgbuild_path}"
-    fi
-
-    # Finally, generate the update packages ...
-    if [[ "${kernel_name}" == "_utils" ]]; then
-        msg2 "Removing old zfs-utils patches (if any)"
-        run_cmd_no_output "rm -f ${zfs_utils_pkgbuild_path}/*.patch"
-        msg2 "Removing old bash completion file"
-        run_cmd_no_output "rm -f ${zfs_utils_pkgbuild_path}/zfs-utils.bash-completion-r1"
-        msg2 "Copying zfs-utils patches (if any)"
-        run_cmd_no_output "find ${script_dir}/src/zfs-utils -name \*.patch -exec cp {} ${zfs_utils_pkgbuild_path} \;"
-        msg2 "Creating zfs-utils PKGBUILD"
-        run_cmd_no_output "source ${script_dir}/src/zfs-utils/PKGBUILD.sh"
-        msg2 "Creating zfs-utils.install"
-        run_cmd_no_output "source ${script_dir}/src/zfs-utils/zfs-utils.install.sh"
-        msg2 "Copying zfs-utils hooks"
-        run_cmd_no_output "cp ${script_dir}/src/zfs-utils/*.hook ${zfs_utils_pkgbuild_path}/"
-        msg2 "Copying zfs-utils hook install files"
-        run_cmd_no_output "cp ${script_dir}/src/zfs-utils/*.install ${zfs_utils_pkgbuild_path}/"
-    elif [[ "${kernel_name}" == "dkms" ]]; then
-        msg2 "Removing old zfs patches (if any)"
-        run_cmd_no_output "rm -f ${zfs_dkms_pkgbuild_path}/*.patch"
-        msg2 "Copying zfs patches (if any)"
-        run_cmd_no_output "find ${script_dir}/src/zfs-dkms -name \*.patch -exec cp {} ${zfs_dkms_pkgbuild_path} \;"
-        msg2 "Creating zfs-dkms PKGBUILD"
-        run_cmd_no_output "source ${script_dir}/src/zfs-dkms/PKGBUILD.sh"
-    else
-        msg2 "Removing old zfs patches (if any)"
-        run_cmd_no_output "rm -f ${zfs_pkgbuild_path}/*.patch"
-        msg2 "Copying zfs patches (if any)"
-        run_cmd_no_output "find ${script_dir}/src/zfs -name \*.patch -exec cp {} ${zfs_pkgbuild_path} \;"
-        msg2 "Creating zfs PKGBUILD"
-        run_cmd_no_output "source ${script_dir}/src/zfs/PKGBUILD.sh"
-        msg2 "Creating zfs.install"
-        run_cmd_no_output "source ${script_dir}/src/zfs/zfs.install.sh"
-    fi
-
-    msg "Update diffs ..."
-    if [[ ! -z ${zfs_utils_pkgbuild_path} ]]; then
-        run_cmd "cd ${script_dir}/${zfs_utils_pkgbuild_path} && git --no-pager diff"
-    fi
-
-    if [[ ! -z ${zfs_pkgbuild_path} ]]; then
-        run_cmd "cd ${script_dir}/${zfs_pkgbuild_path} && git --no-pager diff"
-    fi
-
-    msg "Resetting ownership"
-    run_cmd "chown -R ${makepkg_nonpriv_user}: '${script_dir}/packages/${kernel_name}/'"
-}
-
 
 build_packages() {
-    for pkg in "${pkg_list[@]}"; do
+  unset PKG_KERNEL_NAME
+  unset LOCAL_PKG_FILES
+  PKG_KERNEL_NAME=${KERNEL_NAME/_/-}
 
-        if check_skip_build $pkg; then
-            msg "skipping"
-            continue;
-        fi
+  for PKG in "${PKG_LIST[@]}"; do
+    if [[ $PKG = "std" ]]; then
+      PKG_FULLNAME="zfs-${PKG_KERNEL_NAME}"
+    else
+      PKG_FULLNAME="zfs-${PKG_KERNEL_NAME}-${PKG}"
+    fi
 
-        msg "Building ${pkg}..."
+    PKG_FULLNAME=${PKG_FULLNAME/--/-}
 
+    if ! [ -d "${BINDDIR}/packages/${KERNEL_NAME}/${PKG_FULLNAME}" ]; then
+      echo -e "${YELLOW}==> WARN:${WHITE} Requested build of ${KERNEL_NAME}/${PKG_FULLNAME} but directory does not exist. Skipping ...${NOCOLOR}\n"
+    else
+      cd "${BINDDIR}/packages/${KERNEL_NAME}/${PKG_FULLNAME}"
+      if [[ -f ./PKGBUILD ]]; then
+        echo -e "${BLUE}==>${WHITE} Building package ${KERNEL_NAME}/${PKG_FULLNAME} ...${NOCOLOR}\n"
         # Cleanup all previously built packages for the current package
-        cleanup ${pkg}
+        cleanup ${PKG_FULLNAME}
+        makechrootpkg -c -u -U ${BUILD_USER} -r ${CHROOTDIR} -d ${REPODIR} || true
 
-        run_cmd "cd \"${script_dir}/packages/${kernel_name}/${pkg}\" && ccm64 s"
-        if [[ ${run_cmd_return} -ne 0 ]]; then
-            error "A problem occurred building the package"
-            exit 1
+        LOCAL_PKG_FILES=($(find "${BINDDIR}/packages/${KERNEL_NAME}/${PKG_FULLNAME}/" -maxdepth 1 -name "*.pkg.tar.zst"))
+        if [ ${#LOCAL_PKG_FILES[@]} -gt 0 ]; then
+          for LOCAL_PKG in "${LOCAL_PKG_FILES[@]}"; do
+            cp "${LOCAL_PKG}" "${REPODIR}/${PKG}/"
+          done
+          repo-add "${REPODIR}/${PKG}/archzfs_${PKG}.db.tar.zst" ${REPODIR}/${PKG}/${PKG_FULLNAME}*.pkg.tar.zst
         fi
-    done
-    run_cmd "find . -iname \"*.log\" -print -exec rm {} \\;"
+      else
+        echo -e "${YELLOW}==> WARN:${WHITE} Requested build of ${KERNEL_NAME}/${PKG_FULLNAME} but no PKGBUILD file exists. Skipping ....${NOCOLOR}\n"
+      fi
+    fi
+  done
 }
 
+build_sources() {
+  unset PKG_KERNEL_NAME
+  PKG_KERNEL_NAME=${KERNEL_NAME/_/-}
 
-generate_mode_list
+  for PKG in "${PKG_LIST[@]}"; do
+    if [[ $PKG = "std" ]]; then
+      PKG_FULLNAME="zfs-${PKG_KERNEL_NAME}"
+    else
+      PKG_FULLNAME="zfs-${PKG_KERNEL_NAME}-${PKG}"
+    fi
 
+    PKG_FULLNAME=${PKG_FULLNAME/--/-}
 
-if [[ $# -lt 1 ]]; then
-    usage
-fi
+    if ! [ -d "${BINDDIR}/packages/${KERNEL_NAME}/${PKG_FULLNAME}" ]; then
+      echo -e "${YELLOW}==> WARN:${WHITE} Requested source build of ${KERNEL_NAME}/${PKG_FULLNAME} but directory does not exist. Skipping ...${NOCOLOR}\n"
+    else
+      cd "${BINDDIR}/packages/${KERNEL_NAME}/${PKG_FULLNAME}"
+      if [[ -f ./PKGBUILD ]]; then
+        echo -e "${BLUE}==>${WHITE} Building source for ${KERNEL_NAME}/${PKG_FULLNAME}...${NOCOLOR}\n"
+	
+        makechrootpkg -c -u -U ${BUILD_USER} -r ${CHROOTDIR} -d ${REPODIR} -- --printsrcinfo > .SRCINFO || true
+	makechrootpkg -c -u -U ${BUILD_USER} -r ${CHROOTDIR} -d ${REPODIR} -- --source || true
+
+      else
+        echo -e "${YELLOW}==> WARN:${WHITE} Requested source build of ${KERNEL_NAME}/${PKG_FULLNAME} but no PKGBUILD file exists. Skipping ....${NOCOLOR}\n"
+      fi
+    fi
+  done
+}
 
 
 if [[ ${EUID} -ne 0 ]]; then
-    error "This script must be run as root."
-    exit 155;
+  printf "${RED}==> ERROR:${WHITE} This script must be run as root.\n${NOCOLOR}Aborting.\n" 1>&2
+  exit 155;
 fi
 
-
-for (( a = 0; a < $#; a++ )); do
-    if [[ ${args[$a]} == "make" ]]; then
-        commands+=("make")
-    elif [[ ${args[$a]} == "test" ]]; then
-        commands+=("test")
-    elif [[ ${args[$a]} == "update" ]]; then
-        commands+=("update")
-    elif [[ ${args[$a]} == "update-test" ]]; then
-        commands+=("update-test")
-    elif [[ ${args[$a]} == "sources" ]]; then
-        commands+=("sources")
-    elif [[ ${args[$a]} == "-C" ]]; then
-        commands+=("cleanup")
-    elif [[ ${args[$a]} == "-u" ]]; then
-        commands+=("update_chroot")
-    elif [[ ${args[$a]} == "-U" ]]; then
-        commands+=("update_sums")
-    elif [[ ${args[$a]} == "-R" ]]; then
-        commands+=("reset_pkgs")
-    elif [[ ${args[$a]} == "-n" ]]; then
-        dry_run=1
-    elif [[ ${args[$a]} == "-d" ]]; then
-        debug_flag=1
-    elif [[ ${args[$a]} == "-s" ]]; then
-        only_stable=1
-    elif [[ ${args[$a]} == "-h" ]]; then
-        usage
-    else
-        check_mode "${args[$a]}"
-        debug "have modes '${modes[*]}'"
-    fi
-done
-
-
-if [[ ${#commands[@]} -eq 0 && ${#modes[@]} -eq 0 ]]; then
-    echo
-    error "A build mode or command must be selected!"
-    usage
-fi
-
-
-# Check for internet (thanks Comcast!)
-# Please thank Comcast for this requirement...
-if ! check_internet; then
-    error "Could not reach google dns server! (No internet?)"
-    exit 155
-fi
-
-
-msg "$(date) :: ${script_name} started..."
-
-if have_command "update_sums"; then
-    # Only the files in the zfs-utils package will be updated
-    run_cmd_show_and_capture_output "sha256sum ${script_dir}/src/zfs-utils/zfs-utils.initcpio.hook"
-    azsha2=$(echo ${run_cmd_output} | awk '{ print $1 }')
-    run_cmd_no_output "sed -e 's/^zfs_initcpio_hook_hash.*/zfs_initcpio_hook_hash=\"${azsha2}\"/g' -i ${script_dir}/conf.sh"
-
-    run_cmd_show_and_capture_output "sha256sum ${script_dir}/src/zfs-utils/zfs-utils.initcpio.install"
-    azsha3=$(echo ${run_cmd_output} | awk '{ print $1 }')
-    run_cmd_no_output "sed -e 's/^zfs_initcpio_install_hash.*/zfs_initcpio_install_hash=\"${azsha3}\"/g' -i ${script_dir}/conf.sh"
-
-    run_cmd_show_and_capture_output "sha256sum ${script_dir}/src/zfs-utils/zfs-utils.initcpio.zfsencryptssh.install"
-    azsha3=$(echo ${run_cmd_output} | awk '{ print $1 }')
-    run_cmd_no_output "sed -e 's/^zfs_initcpio_zfsencryptssh_install.*/zfs_initcpio_zfsencryptssh_install=\"${azsha3}\"/g' -i ${script_dir}/conf.sh"
-
-    source_safe "${script_dir}/conf.sh"
-fi
-
-
-if have_command "update_chroot"; then
-    msg "Updating the x86_64 clean chroot..."
-    run_cmd "ccm64 u"
-fi
-
-for (( i = 0; i < ${#modes[@]}; i++ )); do
-    mode=${modes[i]}
-    kernel_name=${kernel_names[i]}
-
-    get_kernel_update_funcs
-    debug_print_default_vars
-
-    export script_dir mode kernel_name
-    source_safe "src/kernels/${kernel_name}.sh"
-
-
-    if have_command "cleanup"; then
-        cleanup
-        # exit
-    fi
-
-
-    if have_command "reset_pkgs"; then
-        msg "Performing git reset for packages/${kernel_name}/*"
-            msg "${update_funcs[@]}"
-        for func in "${update_funcs[@]}"; do
-            debug "Evaluating '${func}'"
-            reset_variables
-            "${func}"
-            msg "${pkg_list[@]}"
-            for pkg in "${pkg_list[@]}"; do
-                run_cmd "cd '${script_dir}/packages/${kernel_name}/${pkg}' && git reset --hard HEAD"
-            done
-        done
-    fi
-
-
-    for func in "${update_funcs[@]}"; do
-        debug "Evaluating '${func}'"
-
-        # skip git packages if -s was used
-        if [[ ${only_stable} -eq 1 && ( ${func} =~ git_pkgbuilds$ || ${func} =~ rc_pkgbuilds$ ) ]]; then
-            debug "Skipping '${func}' (non stable)"
-            continue
-        fi
-        reset_variables
-        "${func}"
-        if have_command "update"; then
-            msg "Updating PKGBUILDs for kernel '${kernel_name}'"
-            generate_package_files
-        fi
-        if have_command "make"; then
-            build_packages
-            build_sources
-        fi
-        if have_command "sources"; then
-            build_sources
-        fi
-    done
-done
+main "$@"; exit
