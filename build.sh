@@ -110,12 +110,13 @@ add_builduser(){
   if [ ! -d "${WORKDIR}" ]; then mkdir -p "${WORKDIR}"; fi
   WORKDIR=$(readlink -e ${WORKDIR})
   OG_WORKDIR_USER="$(stat -c '%U' "${WORKDIR}")"
-  chown -R ${BUILD_USER}:${BUILD_USER} ${WORKDIR}
+  OG_WORKDIR_GROUP="$(stat -c '%G' "${WORKDIR}")"
+  if [[ ${BUILD_USER} == *"buildbot"* ]]; then chown -R ${BUILD_USER}:${BUILD_USER} ${WORKDIR}; else chown -R ${BUILD_USER}:users ${WORKDIR}; fi
 
   sudo -u ${BUILD_USER} test -w "${WORKDIR}" || { \
     echo -e "${RED}==> ERROR:${WHITE} ${BUILD_USER} can not access '${WORKDIR}'.\n${NOCOLOR}Removing build user (if it is a buildbot) and aborting."; \
     if [[ ${BUILD_USER} == *"buildbot"* ]]; then userdel ${BUILD_USER}; fi; \
-    chown -R ${OG_WORKDIR_USER}:${OG_WORKDIR_USER} $WORKDIR; \
+    chown -R ${OG_WORKDIR_USER}:${OG_WORKDIR_GROUP} $WORKDIR; \
     exit 155; \
   }
 
@@ -136,7 +137,7 @@ remove_builduser(){
     echo -e "${YELLOW}==>WARN:${WHITE} Build ran inside Docker; setting owner of SCRIPTDIR to root ...${NOCOLOR}\n"
     chown -R root:root "${SCRIPTDIR}"
   else
-    chown -R ${OG_SCRIPTDIR_USER}:${OG_SCRIPTDIR_USER} "${SCRIPTDIR}"
+    chown -R ${OG_SCRIPTDIR_USER}:${OG_SCRIPTDIR_GROUP} "${SCRIPTDIR}"
   fi
 
   echo -e "${BLUE}==>${WHITE} Removing working directory, sudo config and build user (if it is a buildbot) ...${NOCOLOR}\n"
@@ -157,8 +158,10 @@ fix_permissions(){
   mount --bind ${SCRIPTDIR} ${BINDDIR}
 
   OG_SCRIPTDIR_USER="$(stat -c '%U' "${SCRIPTDIR}")"
-  chown -R ${BUILD_USER}:${BUILD_USER} "${BINDDIR}"
-  chown -R ${BUILD_USER}:${BUILD_USER} "${REPODIR}"
+  OG_SCRIPTDIR_GROUP="$(stat -c '%G' "${SCRIPTDIR}")"
+
+  if [[ ${BUILD_USER} == *"buildbot"* ]]; then chown -R ${BUILD_USER}:${BUILD_USER} ${BINDDIR}; else chown -R ${BUILD_USER}:users ${BINDDIR}; fi
+  if [[ ${BUILD_USER} == *"buildbot"* ]]; then chown -R ${BUILD_USER}:${BUILD_USER} ${REPODIR}; else chown -R ${BUILD_USER}:users ${REPODIR}; fi
 }
 
 create_chroot() {
